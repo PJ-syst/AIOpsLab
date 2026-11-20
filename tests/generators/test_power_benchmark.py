@@ -19,7 +19,7 @@ from clients.power_eval import (
 def test_named_suites_are_stable_and_disjoint():
     assert benchmark_problem_ids("power-smoke") == POWER_SMOKE_IDS
     assert benchmark_problem_ids("current-smoke") == CURRENT_SMOKE_IDS
-    assert len(benchmark_problem_ids("power")) == 20
+    assert len(benchmark_problem_ids("power")) == 21
     assert all(pid.startswith("power_") for pid in benchmark_problem_ids("power"))
     assert all(
         not pid.startswith("power_") for pid in benchmark_problem_ids("current")

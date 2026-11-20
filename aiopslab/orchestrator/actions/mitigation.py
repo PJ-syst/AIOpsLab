@@ -76,7 +76,7 @@ class MitigationActions(TaskActions):
                 # what makes *proactive* mitigation possible — an agent
                 # that acts during the ride-through window prevents the
                 # hard power-off entirely.
-                injector.controller.utility_restored()
+                # Facility restoration is now a separate explicit action.
                 if injector.node_is_powered_off(node):
                     injector.power_on_node(node)
                 else:
@@ -86,3 +86,22 @@ class MitigationActions(TaskActions):
             return f"Power cut to node {node}."
         except Exception as e:
             return f"Error: power operation failed for node {node}: {e}"
+
+    @staticmethod
+    @write
+    def restore_simulated_utility() -> str:
+        """Restore local simulated utility with a one-second operation delay.
+
+        Models a facility operator, separate from node IPMI. Verify node and
+        application recovery afterwards. This does not control real hardware.
+        """
+        import time
+        from aiopslab.generators.fault.inject_power import get_active_injector
+        injector = get_active_injector()
+        if injector is None:
+            return "Error: no active simulated facility session."
+        time.sleep(1.0)
+        injector.controller.utility_restored()
+        injector.facility_restored_by_agent = True
+        injector._log("agent_utility_restored")
+        return "Simulated supply restored; verify nodes and service health."

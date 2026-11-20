@@ -97,8 +97,11 @@ class MitigationTask(Task):
         """
         pod_list = self.kubectl.list_pods(namespace)
         reasons: list[str] = []
+        if not pod_list.items:
+            return ["No application pods exist"]
         for pod in pod_list.items:
             if not pod.status.container_statuses:
+                reasons.append("Pod has no container status")
                 continue
             for container_status in pod.status.container_statuses:
                 waiting = container_status.state.waiting

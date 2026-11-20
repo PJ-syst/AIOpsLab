@@ -99,6 +99,7 @@ def make_localization_task(nodes):
 def make_analysis_task():
     task = PowerOutageAnalysis.__new__(PowerOutageAnalysis)
     task.results = {}
+    task.faulty_nodes = ["kind-worker"]
     return task
 
 
@@ -161,7 +162,7 @@ class TestLocalizationEval:
     def test_superset_gets_partial_credit(self):
         task = make_localization_task(["kind-worker"])
         results = task.eval(["kind-worker", "kind-worker2"], [], 1.0)
-        assert results["Localization Accuracy"] == 50.0
+        assert results["Localization Accuracy"] == pytest.approx(200 / 3)
         assert results["success"] is False
         assert results["is_subset"] is True
 
@@ -182,7 +183,7 @@ class TestAnalysisEval:
     def test_correct_power_analysis(self):
         task = make_analysis_task()
         results = task.eval(
-            {"system_level": "Hardware", "fault_type": "Power Issue"}, [], 1.0
+            {"system_level": "Hardware", "fault_type": "Power Issue", "fault_family": "outage", "affected_nodes": ["kind-worker"], "evidence": "Input voltage zero"}, [], 1.0
         )
         assert results["success"] is True
         assert results["system_level_correct"] is True
@@ -215,10 +216,11 @@ class TestMitigationEval:
         task, _ = make_mitigation_task()
         results = task.eval(None, [], 1.0)
         assert results["success"] is True
-        assert results["TTM"] == 1.0
+        assert results["TTM"] >= 1.0
 
     def test_proactive_when_node_never_went_down(self, patch_node_ready):
-        task, _ = make_mitigation_task(ever_down=False)
+        task, injector = make_mitigation_task(ever_down=False)
+        injector.facility_restored_by_agent = True
         results = task.eval(None, [], 1.0)
         assert results["proactive"] is True
 

@@ -30,6 +30,7 @@ from aiopslab.orchestrator.problems.operator_misoperation import *
 from aiopslab.orchestrator.problems.flower_node_stop import *
 from aiopslab.orchestrator.problems.flower_model_misconfig import *
 from aiopslab.orchestrator.problems.power_faults import *
+from aiopslab.orchestrator.problems.power_faults.power_control import PowerHealthyDetection
 
 
 class ProblemRegistry:
@@ -221,6 +222,7 @@ class ProblemRegistry:
             # Power-aware faults (HotelReservation; see POWER_FAULTS.md)
             # Power outage: hard node power-off
             "power_outage_hotel_res-detection-1": PowerOutageDetection,
+            "power_healthy_hotel_res-detection-1": PowerHealthyDetection,
             "power_outage_hotel_res-localization-1": PowerOutageLocalization,
             "power_outage_hotel_res-analysis-1": PowerOutageAnalysis,
             "power_outage_hotel_res-mitigation-1": PowerOutageMitigation,

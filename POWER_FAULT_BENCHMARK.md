@@ -1,5 +1,42 @@
 # AIOpsLab power-fault simulation and agent benchmark
 
+## Evaluation version 2
+
+Version 2 changes score semantics; do not compare its numbers directly with
+earlier runs. The power suite now includes a healthy telemetry control (21
+cases total). Analysis requires `fault_family`, `affected_nodes`, and a
+nonempty `evidence` summary in addition to the existing fields. Evidence
+presence is checked, but its factual grounding is not automatically graded.
+Localization uses node-set F1, with precision and recall retained separately.
+
+Failed executions remain in score denominators as zero; infrastructure failures
+are marked explicitly. This is a conservative attempted-run score, not a
+claim that every execution error is the agent's fault. Cleanup failures stop
+the batch. Task coverage and completed/attempted counts accompany scores.
+
+Mitigation rejects empty namespaces, missing container statuses, removed
+deployments, and reduced replica targets. TTM now includes post-submission
+recovery checking; `submission_time` and `recovery_wait` remain separate.
+This is measured from session start, not fault onset. Failed recovery has no
+finite TTM and remains a failed attempt.
+
+`power_node(..., "on")` no longer restores facility supply. The explicit
+`restore_simulated_utility()` action models a facility operator with a one
+second delay. This action is available only during an active simulator session.
+Proactive credit additionally requires successful mitigation and this explicit
+facility action, with no recorded node loss.
+
+Use `--repeats 3` for repeated runs. CSV rows include run/repeat IDs; a sibling
+`.manifest.json` records suite version, selected cases, commit, dirty state,
+Python version, step budget and power-related environment overrides.
+
+Still required before publishing a full operational benchmark: application
+request/SLO probes and sustained recovery windows; fault-onset timing; separate
+agent/infrastructure error attribution; image digests/topology/model/prompt
+provenance; confidence intervals; audited safety gates; noisy/delayed telemetry
+tracks; additional workloads and parameterized scenarios. The current manifest
+is not sufficient to reproduce all infrastructure or model settings.
+
 ## Purpose and scope
 
 This extension evaluates an AIOps agent that manages a battery-backed hybrid

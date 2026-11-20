@@ -80,7 +80,7 @@ class PowerUpsDrainMitigation(PowerUpsDrainBaseTask, MitigationTask):
         # Proactive mitigation: the node never actually lost power because
         # the agent acted during the battery ride-through window.
         node = self.faulty_nodes[0] if self.faulty_nodes else None
-        self.results["proactive"] = bool(node) and not self.injector.node_ever_down(
+        self.results["proactive"] = self.results["success"] and bool(getattr(self.injector, "facility_restored_by_agent", False)) and bool(node) and not self.injector.node_ever_down(
             node
         )
         return self.results

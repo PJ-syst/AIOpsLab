@@ -33,6 +33,10 @@ batch is interrupted. The CSV is appended after every problem.
 """
 
 import argparse
+import json
+import platform
+import subprocess
+import uuid
 import asyncio
 import os
 import sys
@@ -86,6 +90,7 @@ CURRENT_SMOKE_IDS = [
 ]
 
 POWER_SMOKE_IDS = [
+    "power_healthy_hotel_res-detection-1",
     "power_outage_hotel_res-detection-1",
     "power_brownout_hotel_res-detection-1",
     "power_load_shedding_hotel_res-detection-1",
@@ -170,6 +175,8 @@ def benchmark_problem_ids(
         pid for pid in registry.get_problem_ids() if not pid.startswith("power_")
     ]
     power_all = power_problem_ids(faults=faults, task_types=task_types)
+    if not task_types or "detection" in task_types:
+        power_all.append("power_healthy_hotel_res-detection-1")
     suites = {
         "power-smoke": POWER_SMOKE_IDS,
         "power": power_all,
@@ -215,11 +222,13 @@ def extract_row(problem_id: str, output: dict) -> dict:
         "task_type": task,
         "suite": suite_of(problem_id),
         "fault_family": fault_family_of(problem_id),
-        "is_no_fault_control": problem_id.startswith("noop_"),
+        "is_no_fault_control": problem_id.startswith(("noop_", "power_healthy_")),
         "steps": results.get("steps"),
         "in_tokens": results.get("in_tokens"),
         "out_tokens": results.get("out_tokens"),
         "framework_overhead": output.get("framework_overhead"),
+        "status": output.get("status", "completed" if results else "infrastructure_failure"),
+        "error": output.get("error"),
     }
 
     time_key = TIME_KEYS[task]
@@ -244,6 +253,11 @@ def extract_row(problem_id: str, output: dict) -> dict:
         if "proactive" in results:
             row["proactive"] = results["proactive"]
 
+    for key in ("precision", "recall", "f1", "submission_time", "recovery_wait", "fault_family_correct"):
+        row[key] = results.get(key)
+    if row["status"] != "completed":
+        row["success"] = False
+        row["accuracy"] = 0.0 if task == "localization" else row.get("accuracy")
     return row
 
 
@@ -269,9 +283,9 @@ def run_problem(problem_id: str, agent, agent_name: str, max_steps: int) -> dict
         try:
             if orchestrator.session is not None and orchestrator.session.problem is not None:
                 orchestrator.session.problem.recover_fault()
-        except Exception:
-            pass
-        return {}
+        except Exception as cleanup_error:
+            return {"status": "cleanup_failure", "error": str(e), "cleanup_error": str(cleanup_error)}
+        return {"status": "infrastructure_failure", "error": str(e)}
 
 
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
@@ -317,16 +331,16 @@ def benchmark_scorecard(df: pd.DataFrame) -> pd.DataFrame:
     mitigation and no-fault false positives remain separate diagnostics.
     """
     scored = df.copy()
-    scored["normalized_score"] = None
+    scored["normalized_score"] = 0.0
     detection = scored["task_type"] == "detection"
     localization = scored["task_type"] == "localization"
     analysis = scored["task_type"] == "analysis"
     mitigation = scored["task_type"] == "mitigation"
     scored.loc[detection | analysis | mitigation, "normalized_score"] = scored.loc[
         detection | analysis | mitigation, "success"
-    ].map({True: 1.0, False: 0.0})
+    ].map({True: 1.0, False: 0.0}).fillna(0.0)
     scored.loc[localization, "normalized_score"] = (
-        scored.loc[localization, "accuracy"].astype(float) / 100.0
+        pd.to_numeric(scored.loc[localization, "accuracy"], errors="coerce").fillna(0) / 100.0
     )
 
     rows = []
@@ -339,6 +353,9 @@ def benchmark_scorecard(df: pd.DataFrame) -> pd.DataFrame:
         proactive = group["proactive"].dropna() if "proactive" in group else []
         row = {
             "suite": suite,
+            "attempted": len(group),
+            "completed": int((group["status"] == "completed").sum()) if "status" in group else len(group),
+            "complete_task_coverage": set(task_scores) == set(TASK_TYPES),
             **{f"{task}_score": task_scores.get(task) for task in TASK_TYPES},
             "overall_score": (
                 sum(task_scores.values()) / len(task_scores) if task_scores else None
@@ -364,6 +381,7 @@ def run_power_eval(
     max_steps: int = 20,
     output: str | None = None,
     problem_ids: list[str] | None = None,
+    repeats: int = 1,
 ) -> pd.DataFrame:
     """Run a batch evaluation over a named current/power problem suite.
 
@@ -412,8 +430,27 @@ def run_power_eval(
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = str(RESULTS_DIR / f"power_eval_{agent_name}_{stamp}.csv")
 
+    if repeats < 1:
+        raise ValueError("repeats must be positive")
+    run_id = str(uuid.uuid4())
+    def git_value(*args):
+        try:
+            return subprocess.check_output(["git", *args], text=True).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+    manifest = {
+        "benchmark_version": 2, "run_id": run_id, "agent": agent_name,
+        "suite": suite, "problem_ids": problem_ids, "repeats": repeats,
+        "max_steps": max_steps, "git_commit": git_value("rev-parse", "HEAD"),
+        "git_dirty": bool(git_value("status", "--porcelain")),
+        "python": platform.python_version(),
+        "environment": {k: v for k, v in os.environ.items() if k.startswith(("POWER_", "AIOPSLAB_"))},
+    }
+    from pathlib import Path
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(str(output) + ".manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     rows = []
-    for pid in problem_ids:
+    for repeat_id, pid in ((r, p) for r in range(repeats) for p in problem_ids):
         print(f"\n[power_eval] ===== {pid} =====")
         start = time.time()
         try:
@@ -427,19 +464,26 @@ def run_power_eval(
                 "task_type": task_type_of(pid),
                 "suite": suite_of(pid),
                 "fault_family": fault_family_of(pid),
-                "is_no_fault_control": pid.startswith("noop_"),
+                "is_no_fault_control": pid.startswith(("noop_", "power_healthy_")),
                 "success": False,
                 "crashed": True,
+                "status": "infrastructure_failure",
+                "error": str(e),
+                "accuracy": 0.0,
                 "steps": None,
                 "in_tokens": None,
                 "out_tokens": None,
             }
         row["wall_time"] = round(time.time() - start, 1)
+        row["run_id"] = run_id
+        row["repeat_id"] = repeat_id
         rows.append(row)
 
         # Persist incrementally so partial results survive interruptions.
         df = pd.DataFrame(rows)
         df.to_csv(output, index=False)
+        if row["status"] == "cleanup_failure":
+            raise RuntimeError("Cleanup failed; batch stopped to prevent contamination")
 
     df = pd.DataFrame(rows)
     print(f"\n[power_eval] per-problem results saved to: {output}")
@@ -502,6 +546,7 @@ def main():
         default=None,
         help="CSV path for per-problem results (default: results dir)",
     )
+    parser.add_argument("--repeats", type=int, default=1)
     args = parser.parse_args()
 
     run_power_eval(
@@ -512,6 +557,7 @@ def main():
         max_steps=args.max_steps,
         output=args.output,
         problem_ids=args.problem_ids,
+        repeats=args.repeats,
     )
 
 

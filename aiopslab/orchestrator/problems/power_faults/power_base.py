@@ -54,6 +54,12 @@ POWER_LOCALIZATION_DESC = """\
 class PowerFaultBaseTask:
     """Base for all power-aware fault problems."""
 
+    def get_task_description(self):
+        description = super().get_task_description()
+        if isinstance(self, AnalysisTask):
+            description += "\nAlso submit fault_family (outage, brownout, load_shedding, generator_cutover, ups_drain), affected_nodes (list of names), and evidence (nonempty observation summary)."
+        return description
+
     def __init__(self):
         self.app = HotelReservation()
         self.kubectl = KubeCtl()
@@ -89,6 +95,10 @@ class PowerFaultBaseTask:
 
     def deploy_power_telemetry(self):
         """Deploy the UPS exporter and open the power-control session."""
+        deployments = self.kubectl.apps_v1_api.list_namespaced_deployment(self.namespace).items
+        self.expected_deployments = {d.metadata.name: d.spec.replicas or 0 for d in deployments}
+        if not self.expected_deployments or not any(self.expected_deployments.values()):
+            raise RuntimeError("No serving deployments available before fault injection")
         try:
             self.ups_exporter.deploy()
         except Exception as e:
@@ -131,7 +141,7 @@ class PowerFaultBaseTask:
 
     def eval_detection_solution(self, soln: Any) -> None:
         print("== Evaluation ==")
-        expected_solution = "Yes"
+        expected_solution = getattr(self, "expected_detection", "Yes")
 
         if isinstance(soln, str):
             if soln.strip().lower() == expected_solution.lower():
@@ -147,7 +157,7 @@ class PowerFaultBaseTask:
     def eval_node_localization(self, soln: Any) -> None:
         print("== Evaluation ==")
 
-        if soln is None:
+        if not isinstance(soln, (str, list, tuple)) or (not isinstance(soln, str) and not all(isinstance(n, str) for n in soln)):
             print("Solution is None")
             self.add_result("Localization Accuracy", 0.0)
             self.results["success"] = False
@@ -158,6 +168,11 @@ class PowerFaultBaseTask:
         expected = list(self.faulty_nodes)
 
         pred_set, exp_set = set(predicted), set(expected)
+        overlap = len(pred_set & exp_set)
+        precision = overlap / len(pred_set) if pred_set else 0.0
+        recall = overlap / len(exp_set) if exp_set else float(not pred_set)
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        self.results.update(precision=precision, recall=recall, f1=f1)
         if pred_set == exp_set:
             accuracy = 100.0
             print(f"Exact node match: {predicted} | Accuracy: {accuracy}%")
@@ -168,7 +183,7 @@ class PowerFaultBaseTask:
             accuracy = 0.0
             print(f"No node match: {predicted} | Accuracy: {accuracy}%")
 
-        self.add_result("Localization Accuracy", accuracy)
+        self.add_result("Localization Accuracy", 100.0 * f1)
         self.results["success"] = pred_set == exp_set
         self.results["is_subset"] = bool(exp_set) and exp_set.issubset(pred_set)
 
@@ -191,7 +206,13 @@ class PowerFaultBaseTask:
 
         self.results["system_level_correct"] = is_sys_level_correct
         self.results["fault_type_correct"] = is_fault_type_correct
-        self.results["success"] = is_sys_level_correct and is_fault_type_correct
+        expected = self.__class__.__module__.rsplit(".", 1)[-1].removeprefix("power_")
+        family_correct = soln.get("fault_family") == expected
+        nodes = soln.get("affected_nodes")
+        nodes_correct = isinstance(nodes, list) and all(isinstance(n, str) for n in nodes) and set(nodes) == set(self.faulty_nodes)
+        evidence_present = isinstance(soln.get("evidence"), str) and bool(soln["evidence"].strip())
+        self.results.update(fault_family_correct=family_correct, affected_nodes_correct=nodes_correct, evidence_present=evidence_present)
+        self.results["success"] = bool(is_sys_level_correct and is_fault_type_correct and family_correct and nodes_correct and evidence_present)
 
     def eval_power_mitigation(self, node_timeout: float | None = None) -> None:
         """Success: faulty nodes Ready + pods healthy + UPS back ONLINE.
@@ -199,6 +220,8 @@ class PowerFaultBaseTask:
         Node readiness is polled (a mitigated power restore needs minutes for
         kubelet to boot) — a one-shot check would fail correct solutions.
         """
+        evaluation_started = time.monotonic()
+        self.results["submission_time"] = self.results.get("TTM", 0.0)
         if node_timeout is None:
             node_timeout = float(
                 os.environ.get("AIOPSLAB_NODE_READY_TIMEOUT", "420")
@@ -225,6 +248,15 @@ class PowerFaultBaseTask:
             self.injector.controller.snapshot().get("ups_state") == "ONLINE"
         )
         throttles_cleared = not self.injector.has_throttled_nodes
+        deployments_healthy = True
+        for name, replicas in getattr(self, "expected_deployments", {}).items():
+            try:
+                deployment = self.kubectl.get_deployment(name, self.namespace)
+                deployments_healthy &= deployment.spec.replicas == replicas and (deployment.status.available_replicas or 0) >= replicas
+            except Exception:
+                deployments_healthy = False
         self.results["success"] = (
-            all_powered and all_normal and ups_online and throttles_cleared
+            all_powered and all_normal and ups_online and throttles_cleared and deployments_healthy
         )
+        self.results["recovery_wait"] = time.monotonic() - evaluation_started
+        self.results["TTM"] = self.results["submission_time"] + self.results["recovery_wait"] if self.results["success"] else None

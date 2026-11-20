@@ -466,7 +466,7 @@ class TestPowerOps:
             clear_active_injector()
 
         assert result == "Power restored to node kind-worker."
-        assert controller.state is UpsState.ONLINE
+        assert controller.state is UpsState.ON_BATTERY
         assert ("start",) not in docker.containers["kind-worker"].calls
 
 

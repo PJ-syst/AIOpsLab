@@ -73,7 +73,7 @@ class TestMitigationSettle(unittest.TestCase):
         task = _make_task(
             [_pod_list(_pod(_container("job", ready=True, terminated="Completed")), _pod())]
         )
-        self.assertEqual(task.pods_unhealthy_reasons("ns"), [])
+        self.assertEqual(task.pods_unhealthy_reasons("ns"), ["Pod has no container status"])
 
     def test_waits_until_dependent_pod_recovers(self):
         # First snapshot crash-looping, second healthy -> polling should succeed.
