@@ -76,6 +76,17 @@ network_metrics = [
     "container_network_transmit_packets_total",
 ]
 
+# Power/UPS gauges served by the ups-exporter (power-aware fault problems).
+# Absent unless power telemetry is deployed for the problem under test.
+power_metrics = [
+    "power_input_volts",
+    "power_frequency_hz",
+    "ups_state",
+    "ups_battery_charge_ratio",
+    "ups_seconds_remaining",
+    "node_power_state",
+]
+
 
 def time_format_transform(time):
     # transform time data from int to datetime
@@ -370,6 +381,18 @@ class PrometheusAPI:
                         dt.to_csv(f, header=False, index=False)
                 else:
                     dt.to_csv(file_path, index=False)
+
+            # Power/UPS gauges (present only for power-aware fault problems).
+            try:
+                self._export_power_metrics_pass(
+                    time_format_transform(start_time),
+                    time_format_transform(current_et),
+                    save_path,
+                    step=step,
+                )
+            except Exception as e:
+                print(f"Power metrics export skipped: {e}")
+
             self.cleanup() # Stop port-forwarding after metrics are exported
 
             # # for metric in istio_metrics:
@@ -417,6 +440,56 @@ class PrometheusAPI:
                 export_msg += f"{subindent}{f}\n"
         # print(export_msg)
         return export_msg
+
+    def _export_power_metrics_pass(
+        self, start_time, end_time, save_path, step: int = 15
+    ):
+        """Export UPS/power gauges (no-op when power telemetry is absent).
+
+        Unlike the container-metric pass, this queries metrics across all
+        namespaces (the ups-exporter lives in `observe`) and does not filter
+        by app-namespace pods. Series keep their labels (e.g. node) in the
+        cmdb_id column.
+        """
+        power_save_path = os.path.join(save_path, "power")
+        os.makedirs(power_save_path, exist_ok=True)
+
+        found_any = False
+        for metric in power_metrics:
+            data_raw = self.client.custom_query_range(
+                metric, start_time, end_time, step=step
+            )
+            if len(data_raw) == 0:
+                continue
+            found_any = True
+            timestamp_list, cmdb_id_list, kpi_list, value_list = [], [], [], []
+            for data in data_raw:
+                labels = data.get("metric", {}) or {}
+                # Series identity: node label when present, else the site.
+                cmdb_id = labels.get("node") or labels.get("pod") or "site"
+                for point in data["values"]:
+                    timestamp_list.append(int(point[0]))
+                    cmdb_id_list.append(cmdb_id)
+                    kpi_list.append(metric)
+                    value_list.append(round(float(point[1]), 3))
+            dt = pd.DataFrame(
+                {
+                    "timestamp": timestamp_list,
+                    "cmdb_id": cmdb_id_list,
+                    "kpi_name": kpi_list,
+                    "value": value_list,
+                }
+            )
+            dt = dt.sort_values(by="timestamp")
+            file_path = os.path.join(power_save_path, "kpi_" + metric + ".csv")
+            if os.path.exists(file_path):
+                with open(file_path, "a", encoding="utf-8", newline="") as f:
+                    dt.to_csv(f, header=False, index=False)
+            else:
+                dt.to_csv(file_path, index=False)
+        if found_any:
+            print(f"Exported power metrics to {power_save_path}")
+        return found_any
 
     def get_all_metrics(self):
         """Get all of the metrics"""

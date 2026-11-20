@@ -193,3 +193,112 @@ jobs:
           name: kind-logs
           path: /tmp/kind-logs
           retention-days: 7
+
+  # -----------------------------------------------------------------------
+  # Power-aware fault tests: unit suite + injector/integration/e2e tests.
+  # Uses a 3-worker cluster (kind-config-power.yaml) so load shedding and
+  # pod rescheduling have somewhere to reschedule to. See POWER_FAULTS.md.
+  # -----------------------------------------------------------------------
+  power-faults:
+    name: power-fault unit + integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository (with submodules)
+        uses: actions/checkout@3d3c42e5aac5ba808525da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Install kind
+        run: |
+          curl -Lo /tmp/kind-bin https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x /tmp/kind-bin
+          sudo mv /tmp/kind-bin /usr/local/bin/kind
+          kind version
+
+      - name: Install Helm
+        run: curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Pre-pull kind node image
+        run: docker pull jacksonarthurclark/aiopslab-kind-x86:latest
+
+      - name: Prepare /run/udev for OpenEBS NDM
+        run: sudo mkdir -p /run/udev
+
+      - name: Create kind cluster (3 workers)
+        run: |
+          kind create cluster \
+            --config kind/kind-config-power.yaml \
+            --wait 120s
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Pre-install OpenEBS
+        run: |
+          kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml
+          echo "Waiting up to 10 min for OpenEBS pods to be ready (cold image pull)..."
+          kubectl wait pod --all -n openebs \
+            --for=condition=Ready \
+            --timeout=600s
+          kubectl patch storageclass openebs-hostpath \
+            -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+          echo "OpenEBS is ready."
+
+      - name: Pre-install Prometheus
+        run: |
+          kubectl create namespace observe --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f aiopslab/observer/prometheus/prometheus-pvc.yml -n observe
+          helm dependency update aiopslab/observer/prometheus/prometheus/
+          helm install prometheus aiopslab/observer/prometheus/prometheus/ \
+            -n observe --create-namespace
+          echo "Waiting up to 10 min for Prometheus pods to be ready (cold image pull)..."
+          kubectl wait pod --all -n observe \
+            --for=condition=Ready \
+            --timeout=600s
+          echo "Prometheus is ready."
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c386215e4f97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install --without clients --with dev
+
+      - name: Generate aiopslab/config.yml
+        run: |
+          cat > aiopslab/config.yml <<'EOF'
+          k8s_host: kind
+          k8s_user: runner
+          ssh_key_path: ~/.ssh/id_rsa
+          data_dir: data
+          qualitative_eval: false
+          print_session: false
+          EOF
+
+      - name: Run unit tests (generators + registry)
+        run: poetry run pytest tests/generators tests/registry -v -m "not integration"
+
+      - name: Run power fault integration tests
+        run: poetry run pytest tests/integration/test_power_faults.py -v -s -m integration
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          echo "=== All namespaced resources ==="
+          kubectl get all --all-namespaces
+          echo "=== Recent events ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp' | tail -40
+          kind export logs --name kind /tmp/kind-logs
+
+      - name: Upload kind logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5a0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kind-power-logs
+          path: /tmp/kind-logs
+          retention-days: 7

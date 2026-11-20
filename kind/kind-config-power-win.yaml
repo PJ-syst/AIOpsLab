@@ -1,0 +1,21 @@
+# kind cluster for power-aware fault testing on Windows (Docker Desktop).
+#
+# Same topology as kind-config-power.yaml but without the /run/udev
+# extraMounts, which do not exist on Windows hosts and make node containers
+# fail to boot. The udev mount is only used by OpenEBS Node Disk Manager for
+# block-device discovery on Linux; localpv-hostpath provisioning works
+# without it.
+#
+# Usage (Windows):
+#   kind create cluster --config kind/kind-config-power-win.yaml --wait 120s
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    image: jacksonarthurclark/aiopslab-kind-x86:latest
+  - role: worker
+    image: jacksonarthurclark/aiopslab-kind-x86:latest
+  - role: worker
+    image: jacksonarthurclark/aiopslab-kind-x86:latest
+  - role: worker
+    image: jacksonarthurclark/aiopslab-kind-x86:latest

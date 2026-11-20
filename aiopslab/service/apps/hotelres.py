@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import os
 import time
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.service.apps.base import Application
@@ -68,7 +69,10 @@ class HotelReservation(Application):
         """Deploy the Kubernetes configurations."""
         print(f"Deploying Kubernetes configurations in namespace: {self.namespace}")
         self.kubectl.apply_configs(self.namespace, self.k8s_deploy_path)
-        self.kubectl.wait_for_ready(self.namespace)
+        self.kubectl.wait_for_ready(
+            self.namespace,
+            max_wait=int(os.environ.get("AIOPSLAB_APP_DEPLOY_TIMEOUT", "300")),
+        )
     
     def deploy_without_wait(self):
         """Deploy the Kubernetes configurations without waiting for ready."""

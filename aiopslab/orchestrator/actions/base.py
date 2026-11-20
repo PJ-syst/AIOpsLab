@@ -76,6 +76,47 @@ class TaskActions:
         return logs
 
     @staticmethod
+    @read
+    def get_power_status() -> str:
+        """
+        Query the facility power state: UPS status and per-node power.
+
+        Reports the UPS state (online / on battery / on generator / power
+        lost), utility input voltage and frequency, battery charge, seconds
+        of ride-through remaining, and the power state of each node. Power
+        telemetry is deployed for power-aware fault problems.
+
+        Returns:
+            str: Human-readable power status report, or a notice that no
+                 power telemetry is available.
+        """
+        from aiopslab.generators.fault.power.ups import read_power_state
+
+        state = read_power_state()
+        if state is None:
+            return (
+                "No power telemetry available (UPS state not deployed for "
+                "this problem)."
+            )
+
+        lines = [
+            "UPS status:",
+            f"  State: {state.get('ups_state')}",
+            f"  Input voltage: {state.get('input_volts')} V",
+            f"  Frequency: {state.get('frequency_hz')} Hz",
+            f"  Battery charge: {state.get('battery_charge_ratio', 0) * 100:.1f}%",
+        ]
+        remaining = state.get("seconds_remaining")
+        if remaining is not None:
+            lines.append(f"  Seconds remaining on battery: {remaining}")
+        nodes = state.get("nodes") or {}
+        if nodes:
+            lines.append("Node power state:")
+            for node, powered in sorted(nodes.items()):
+                lines.append(f"  {node}: {'on' if powered == 'on' else 'OFF'}")
+        return "\n".join(lines)
+
+    @staticmethod
     @action
     def exec_shell(command: str, timeout: int = 30) -> str:
         """

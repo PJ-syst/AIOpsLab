@@ -1,0 +1,257 @@
+# UPS/power telemetry exporter for AIOpsLab power-aware faults.
+#
+# Serves the state published by the host-side PowerController (ConfigMap
+# `ups-power-state` in the `observe` namespace) as Prometheus gauges:
+#   power_input_volts, power_frequency_hz, ups_state,
+#   ups_battery_charge_ratio, ups_seconds_remaining, node_power_state{node}
+#
+# The exporter is stdlib-only (no pip installs) and is pinned to the
+# control-plane node so facility telemetry survives worker power loss,
+# like monitoring circuits in a real datacenter.
+#
+# Applied/removed by aiopslab.observer.ups_exporter.UpsExporter.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ups-exporter-script
+  namespace: observe
+data:
+  exporter.py: |
+    import json
+    import os
+    import ssl
+    import sys
+    import threading
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    STATE_CONFIGMAP = os.environ.get("UPS_STATE_CONFIGMAP", "ups-power-state")
+    STATE_NAMESPACE = os.environ.get("UPS_STATE_NAMESPACE", "observe")
+    PORT = int(os.environ.get("UPS_EXPORTER_PORT", "9801"))
+
+    STATE_VALUE = {
+        "ONLINE": 0,
+        "ON_BATTERY": 1,
+        "ON_GENERATOR": 2,
+        "POWER_LOST": 3,
+    }
+
+    _cache_lock = threading.Lock()
+    _cache = {"state": None, "ok": False}
+
+
+    def read_state():
+        token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        ca_path = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        try:
+            with open(token_path) as f:
+                token = f.read()
+            url = (
+                "https://kubernetes.default.svc/api/v1/namespaces/"
+                + STATE_NAMESPACE
+                + "/configmaps/"
+                + STATE_CONFIGMAP
+            )
+            req = urllib.request.Request(
+                url, headers={"Authorization": "Bearer " + token}
+            )
+            ctx = ssl.create_default_context(cafile=ca_path)
+            with urllib.request.urlopen(req, context=ctx, timeout=4) as resp:
+                cm = json.load(resp)
+            state = json.loads(cm["data"]["state.json"])
+            with _cache_lock:
+                _cache["state"] = state
+                _cache["ok"] = True
+            return state, True
+        except Exception as e:
+            sys.stderr.write("ups-exporter: state read failed: %s\n" % e)
+            with _cache_lock:
+                _cache["ok"] = False
+            return _cache["state"], False
+
+
+    def _fmt(value):
+        if value is None:
+            return "-1"
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, float):
+            return "%.4f" % value
+        return str(value)
+
+
+    def _gauge(lines, name, help_text, value, labels=""):
+        lines.append("# HELP %s %s" % (name, help_text))
+        lines.append("# TYPE %s gauge" % name)
+        lines.append("%s%s %s" % (name, labels, _fmt(value)))
+
+
+    def render(state, ok):
+        lines = []
+        _gauge(
+            lines,
+            "ups_up",
+            "1 when the exporter can read the UPS state ConfigMap",
+            1 if ok else 0,
+        )
+        if state is None:
+            return "\n".join(lines) + "\n"
+
+        _gauge(
+            lines,
+            "power_input_volts",
+            "Utility input voltage in volts (0 during an outage)",
+            state.get("input_volts"),
+        )
+        _gauge(
+            lines,
+            "power_frequency_hz",
+            "Utility input frequency in Hz",
+            state.get("frequency_hz"),
+        )
+        _gauge(
+            lines,
+            "ups_state",
+            "0=online 1=on_battery 2=on_generator 3=power_lost",
+            STATE_VALUE.get(state.get("ups_state"), -1),
+        )
+        _gauge(
+            lines,
+            "ups_battery_charge_ratio",
+            "UPS battery charge fraction 0..1",
+            state.get("battery_charge_ratio"),
+        )
+        _gauge(
+            lines,
+            "ups_seconds_remaining",
+            "Seconds of battery ride-through left (-1 when not on battery)",
+            state.get("seconds_remaining"),
+        )
+        lines.append(
+            "# HELP node_power_state Whether a node is powered (1) or off (0)"
+        )
+        lines.append("# TYPE node_power_state gauge")
+        for node, powered in sorted((state.get("nodes") or {}).items()):
+            lines.append(
+                'node_power_state{node="%s"} %s'
+                % (node, "1" if powered == "on" else "0")
+            )
+        return "\n".join(lines) + "\n"
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/metrics", "/healthz"):
+                self.send_response(404)
+                self.end_headers()
+                return
+            state, ok = read_state()
+            body = render(state, ok).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            pass
+
+
+    if __name__ == "__main__":
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+        print("ups-exporter serving on :%d" % PORT, flush=True)
+        server.serve_forever()
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ups-exporter
+  namespace: observe
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ups-exporter
+  namespace: observe
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["ups-power-state"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ups-exporter
+  namespace: observe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ups-exporter
+subjects:
+  - kind: ServiceAccount
+    name: ups-exporter
+    namespace: observe
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ups-exporter
+  namespace: observe
+  labels:
+    app: ups-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ups-exporter
+  template:
+    metadata:
+      labels:
+        app: ups-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9801"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: ups-exporter
+      # Facility telemetry must survive worker power loss: pin to control-plane.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: exporter
+          image: python:3.12-slim
+          command: ["python", "/exporter/exporter.py"]
+          env:
+            - name: UPS_STATE_CONFIGMAP
+              value: ups-power-state
+            - name: UPS_STATE_NAMESPACE
+              value: observe
+          ports:
+            - name: metrics
+              containerPort: 9801
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9801
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: script
+              mountPath: /exporter
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: script
+          configMap:
+            name: ups-exporter-script

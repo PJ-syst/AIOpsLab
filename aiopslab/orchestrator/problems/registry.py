@@ -29,6 +29,7 @@ from aiopslab.orchestrator.problems.wrong_bin_usage import *
 from aiopslab.orchestrator.problems.operator_misoperation import *
 from aiopslab.orchestrator.problems.flower_node_stop import *
 from aiopslab.orchestrator.problems.flower_model_misconfig import *
+from aiopslab.orchestrator.problems.power_faults import *
 
 
 class ProblemRegistry:
@@ -217,6 +218,32 @@ class ProblemRegistry:
             # Flower
             "flower_node_stop-detection": FlowerNodeStopDetection,
             "flower_model_misconfig-detection": FlowerModelMisconfigDetection,
+            # Power-aware faults (HotelReservation; see POWER_FAULTS.md)
+            # Power outage: hard node power-off
+            "power_outage_hotel_res-detection-1": PowerOutageDetection,
+            "power_outage_hotel_res-localization-1": PowerOutageLocalization,
+            "power_outage_hotel_res-analysis-1": PowerOutageAnalysis,
+            "power_outage_hotel_res-mitigation-1": PowerOutageMitigation,
+            # Brownout: sustained undervoltage, degraded nodes
+            "power_brownout_hotel_res-detection-1": PowerBrownoutDetection,
+            "power_brownout_hotel_res-localization-1": PowerBrownoutLocalization,
+            "power_brownout_hotel_res-analysis-1": PowerBrownoutAnalysis,
+            "power_brownout_hotel_res-mitigation-1": PowerBrownoutMitigation,
+            # Load shedding: rolling scheduled power cuts across nodes
+            "power_load_shedding_hotel_res-detection-1": PowerLoadSheddingDetection,
+            "power_load_shedding_hotel_res-localization-1": PowerLoadSheddingLocalization,
+            "power_load_shedding_hotel_res-analysis-1": PowerLoadSheddingAnalysis,
+            "power_load_shedding_hotel_res-mitigation-1": PowerLoadSheddingMitigation,
+            # Generator cutover: ATS transfer with a blip node losing power
+            "power_generator_cutover_hotel_res-detection-1": PowerGeneratorCutoverDetection,
+            "power_generator_cutover_hotel_res-localization-1": PowerGeneratorCutoverLocalization,
+            "power_generator_cutover_hotel_res-analysis-1": PowerGeneratorCutoverAnalysis,
+            "power_generator_cutover_hotel_res-mitigation-1": PowerGeneratorCutoverMitigation,
+            # UPS battery drain: ride-through countdown then hard power loss
+            "power_ups_drain_hotel_res-detection-1": PowerUpsDrainDetection,
+            "power_ups_drain_hotel_res-localization-1": PowerUpsDrainLocalization,
+            "power_ups_drain_hotel_res-analysis-1": PowerUpsDrainAnalysis,
+            "power_ups_drain_hotel_res-mitigation-1": PowerUpsDrainMitigation,
         }
         self.DOCKER_REGISTRY = [
             "flower_node_stop-detection",

@@ -44,6 +44,7 @@ class AnalysisTask(Task):
                     - 'Network/Storage Issue'
                     - 'Operation Error'
                     - 'Dependency Problem'
+                    - 'Power Issue'
             
             2. str: `None` if no faults were detected
             """
